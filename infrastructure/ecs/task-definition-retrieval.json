@@ -1,0 +1,56 @@
+{
+  "family": "document-services-retrieval",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/document-services-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/document-services-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "retrieval-service",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/document-services/retrieval-service:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 4002,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "DB_HOST", "value": "REPLACE_RDS_ENDPOINT" },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_NAME", "value": "documents" },
+        { "name": "DB_USER", "value": "docadmin" },
+        { "name": "REDIS_HOST", "value": "REPLACE_REDIS_ENDPOINT" },
+        { "name": "REDIS_PORT", "value": "6379" },
+        { "name": "S3_BUCKET", "value": "REPLACE_S3_BUCKET" },
+        { "name": "AWS_REGION", "value": "us-east-1" }
+      ],
+      "secrets": [
+        {
+          "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:document-services/db-password"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/document-services/retrieval-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4002/health')\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

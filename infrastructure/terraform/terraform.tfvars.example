@@ -1,0 +1,12 @@
+aws_region      = "us-east-1"
+project_name    = "intervixa-services"
+environment     = "prod"
+db_password     = "intervixa14581"
+
+# Set after building and pushing images to ECR
+ingestion_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/document-services/ingestion-service:latest"
+retrieval_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/document-services/retrieval-service:latest"
+
+ingestion_desired_count = 1
+retrieval_desired_count = 1
+openai_api_key          = "dummy"
