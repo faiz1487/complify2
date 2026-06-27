@@ -1,0 +1,1323 @@
+
+
+
+
+
+
+
+
+
+
+
+
+AWS Complify Microservices – Step‑by‑Step Setup Guide
+
+Architecture:
+- 1 VPC
+- 2 Public Subnets
+- 2 Private App Subnets
+- Internet Gateway
+- 2 NAT Gateway (but now use only one NAT)
+- ALB Public
+- Target group (
+- ECS Fargate (3 services)
+- RDS PostgreSQL (Private)
+- ElastiCache Redis (Private)
+- S3 bucket(folder structure wise)
+- SQS service (
+- ECR (2 repositories)
+- CloudWatch Logs
+- Route53
+
+---
+
+# Step 1: Create VPC
+
+Open:
+AWS Console → VPC → Create VPC
+
+Settings:
+
+Name: complify-vpc
+CIDR: 10.0.0.0/16
+
+Create
+
+---
+# Step 2: Create Subnets
+
+Create 4 subnets:
+
+Public Subnet A
+CIDR: 10.0.1.0/24
+AZ: me-central-1a
+
+Public Subnet B
+CIDR: 10.0.2.0/24
+AZ: me-central-1b
+
+Private App Subnet A
+CIDR: 10.0.10.0/24
+AZ: me-central-1a
+
+Private App Subnet B
+CIDR: 10.0.11.0/24
+AZ: me-central-1b
+
+Enable auto assign public IP only on public subnets.
+
+---
+# Step 3: Create Internet Gateway
+
+VPC → Internet Gateway
+
+Create:
+complify-igw
+
+Attach to:
+complify-vpc
+
+---
+
+# Step 4: NAT Gateway Count
+
+For production:
+
+Create 2 NAT Gateways
+
+NAT-A → Public Subnet A
+NAT-B → Public Subnet B
+
+Allocate Elastic IP for each.
+
+Reason:
+If one AZ fails, private services still access the internet.
+
+Budget option:
+1 NAT gateway works but creates a single point of failure.
+
+—
+Currently we use only one NAT gateway for both private subnets
+
+# Step 5: Create Route Tables
+
+Create Public Route Table
+
+Routes:
+0.0.0.0/0 → IGW
+
+Associate:
+Public Subnet A
+Public Subnet B
+
+
+Create Private Route Table A
+
+Routes:
+0.0.0.0/0 → NAT-A
+
+Associate:
+Private App Subnet A
+
+
+Create Private Route Table B
+
+Routes:
+0.0.0.0/0 → NAT-B
+
+Associate:
+Private App Subnet B
+
+---
+
+# Step 6: Security Groups
+
+ALB Security Group
+
+Inbound:
+443 → 0.0.0.0/0
+80 → 0.0.0.0/0
+
+Outbound:
+4001 → ECS SG
+4002 → ECS SG
+
+
+ECS Security Group
+
+Inbound:
+4001 from ALB SG
+4002 from ALB SG
+
+Outbound:
+5432 → RDS
+6379 → Redis
+443 → internet via NAT
+
+
+RDS Security Group
+
+Inbound:
+5432 from ECS SG
+
+No public access
+
+
+Redis Security Group
+
+Inbound:
+6379 from ECS SG
+
+No public access
+
+---
+
+# Step 7: Create S3 Bucket
+
+Open:
+S3 → Create bucket
+
+Bucket name:
+complify-documents
+
+Disable public access:
+ON
+
+Enable versioning:
+ON
+
+Create bucket
+
+---
+
+# Step 9: Create RDS PostgreSQL
+
+Open:
+RDS → Create database
+
+Engine:
+PostgreSQL
+
+Template:
+Production
+
+DB instance:
+db.t4g.medium
+
+Multi‑AZ:
+Enable
+
+Storage:
+500 GB gp3
+
+Public Access:
+NO
+
+VPC:
+complify-vpc
+
+Subnet Group:
+Create DB subnet group
+
+Add:
+Private Subnet A
+Private Subnet B
+
+Security Group:
+RDS-SG
+
+Create
+
+After deployment copy endpoint:
+
+DB_HOST=<endpoint>
+DB_PORT=5432
+
+---
+
+# Step 10: Create Redis (ElastiCache)
+
+Open:
+ElastiCache
+
+Redis OSS
+
+Cluster mode:
+Disabled
+
+Node:
+cache.t4g.small
+
+Subnet group:
+Private subnets
+
+Public access:
+Disabled
+
+Security Group:
+Redis-SG
+
+Create
+
+Copy endpoint:
+
+REDIS_HOST=<endpoint>
+REDIS_PORT=6379
+
+---
+# Step 11: Create ECR Repositories
+
+ECR → Create repository
+
+Repository 1:
+complify-ingestion
+
+Repository 2:
+complify-retrieval
+
+Mutable tags:
+Enabled
+
+Push images:
+
+aws ecr get-login-password --region me-central-1 | docker login --username AWS --password-stdin account-id.dkr.ecr.me-central-1.amazonaws.com
+
+Tag:
+
+docker tag ingestion:latest repo-url/complify-ingestion:latest
+
+docker tag retrieval:latest repo-url/complify-retrieval:latest
+
+Push:
+
+docker push repo-url/complify-ingestion:latest
+
+docker push repo-url/complify-retrieval:latest
+
+---
+
+# Step 12: Create ECS Cluster
+
+ECS → Cluster → Create
+
+Type:
+Networking only
+
+Name:
+complify-cluster
+
+Create
+
+---
+
+# Step 13: Create CloudWatch Log Groups
+
+CloudWatch → Log Groups
+
+Create:
+
+/ecs/complify-ingestion
+/ecs/complify-retrieval
+
+---
+
+# Step 14: Create Task Definition (Service 1)
+
+Task:
+complify-ingestion-task
+
+Launch:
+Fargate
+
+CPU:
+2 vCPU
+
+Memory:
+8GB
+
+Port:
+4001
+
+Environment:
+
+DB_HOST=<rds endpoint>
+DB_PORT=5432
+DB_NAME= complify
+DB_USER= postgres
+DB_PASSWORD=mypassword
+REDIS_HOST=<redis endpoint>
+REDIS_PORT=6379
+S3_BUCKET=complify-documents
+AWS_REGION=me-central-1
+
+Logs:
+CloudWatch
+
+Image:
+ECR ingestion image
+
+Create
+
+---
+
+# Step 15: Create Task Definition (Service 2)
+
+Task:
+complify-retrieval-task
+
+Port:
+4002
+
+Image:
+ECR retrieval image
+
+Same env variables
+
+Create
+
+---
+
+# Step 16: Create Application Load Balancer
+
+EC2 → Load Balancer
+
+Type:
+Application Load Balancer
+
+Name:
+complify-alb
+
+Scheme:
+Internet facing
+
+Subnets:
+Public A
+Public B
+
+Security group:
+ALB-SG
+
+---
+
+# Step 17: Create Target Groups
+
+Target Group 1
+
+Name:
+ingestion-tg
+
+Port:
+4001
+Target type:
+IP
+
+
+Target Group 2
+
+Name:
+retrieval-tg
+
+Port:
+4002
+Target type:
+IP
+
+---
+
+# Step 18: Listener Rules
+
+HTTPS Listener:
+443
+
+Rule 1:
+/api/upload/*
+→ ingestion-tg
+
+Rule 2:
+/api/search/*
+→ retrieval-tg
+
+---
+
+# Step 19: Create ECS Services
+
+Service 1:
+complify-ingestion-service
+
+Task:
+complify-ingestion-task
+
+Subnets:
+Private A + B
+
+Assign Public IP:
+Disabled
+
+Attach:
+ingestion-tg
+
+Desired tasks:
+1
+
+
+Service 2:
+complify-retrieval-service
+
+Task:
+retrieval-task
+
+Attach:
+retrieval-tg
+
+Desired:
+1
+
+---
+
+# Step 20: Route53
+
+Open Route53
+
+Create hosted zone
+
+Domain:
+complify.com
+
+Create A record:
+
+api.complify.com
+
+Alias → ALB DNS
+
+---
+
+# Final Flow
+
+User
+↓
+Route53
+↓
+HTTPS
+↓
+ALB
+↓
+Listener Rules
+↓
+RDS PostgreSQL
+↓
+Redis
+↓
+ECR
+↓
+ECS Fargate Services
+↓
+CloudWatch Logs
+
+Production Result:
+
+Public: ALB only
+Private: ECS + RDS + Redis + S3 access
+Multi-AZ deployment
+No public DB access
+
+
+Complete Step-by-Step Setup
+S3 + SQS Event-Driven Document Processing Pipeline
+Using:
+Amazon Web Services (AWS)
+Amazon S3
+Amazon SQS
+Amazon ECS
+
+Final Architecture
+User Upload
+     ↓
+Backend API (ECS)
+     ↓
+S3 raw/
+     ↓
+S3 Event Notification
+     ↓
+SQS Queue
+     ↓
+ECS Ingestion Worker
+     ↓
+processing/
+     ↓
+processed/ OR failed/
+     ↓
+archive/ (old data)
+
+
+STEP 1 — Create S3 Bucket
+Open AWS Console:
+https://console.aws.amazon.com/s3/
+Click:
+Create bucket
+
+
+STEP 2 — Configure Bucket
+Bucket Name
+Example:
+document-processing-prod
+
+Must be globally unique.
+
+AWS Region
+Use same region as:
+ECS
+RDS
+Redis
+Example:
+us-east-1
+
+
+Block Public Access
+Keep enabled:
+✔ Block all public access
+
+
+Versioning
+Optional but recommended:
+Enable Bucket Versioning
+
+
+Create Bucket
+Click:
+Create bucket
+
+
+STEP 3 — Create Folder Structure
+Open bucket.
+Click:
+Create folder
+
+Create these folders one by one:
+1. raw/
+raw/
+
+Incoming uploaded files.
+
+2. processing/
+processing/
+
+Temporary active processing files.
+
+3. processed/
+processed/
+
+Successfully processed outputs.
+
+4. failed/
+failed/
+
+Failed files.
+
+5. archive/
+archive/
+
+Old processed data archive.
+
+Final Bucket Structure
+document-processing-prod/
+│
+├── raw/
+├── processing/
+├── processed/
+├── failed/
+└── archive/
+
+
+STEP 4 — Create SQS Queue
+Open AWS Console:
+https://console.aws.amazon.com/sqs/
+Click:
+Create queue
+
+
+STEP 5 — Configure Queue
+Queue Type
+Choose:
+Standard Queue
+
+
+Queue Name
+Example:
+document-processing-queue
+
+
+Visibility Timeout
+Set:
+300 seconds
+
+(5 minutes)
+Must be longer than processing time.
+
+Message Retention
+Example:
+4 days
+
+
+Create Queue
+Click:
+Create queue
+
+
+STEP 6 — Create Dead Letter Queue (DLQ)
+Create another queue.
+Queue Name
+document-processing-dlq
+
+Queue Type
+Standard
+
+Create queue.
+
+STEP 7 — Attach DLQ to Main Queue
+Open:
+document-processing-queue
+
+Go to:
+Edit
+→ Dead-letter queue
+
+Enable:
+Use DLQ
+
+Select:
+document-processing-dlq
+
+Set:
+Maximum receives = 3
+
+Save.
+
+STEP 8 — Copy Queue ARN
+Open queue.
+Copy:
+Queue ARN
+
+Example:
+arn:aws:sqs:us-east-1:123456789012:document-processing-queue
+
+Keep it for next step.
+
+STEP 9 — Copy Bucket ARN
+Open S3 bucket.
+Go to:
+Properties
+
+Copy:
+Bucket ARN
+
+Example:
+arn:aws:s3:::document-processing-prod
+
+
+STEP 10 — Allow S3 to Send Messages to SQS
+Open:
+SQS Queue
+→ Access Policy
+→ Edit
+
+Paste policy:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowS3ToSendMessage",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "s3.amazonaws.com"
+      },
+      "Action": "SQS:SendMessage",
+      "Resource": "SQS_QUEUE_ARN",
+      "Condition": {
+        "ArnEquals": {
+          "aws:SourceArn": "S3_BUCKET_ARN"
+        }
+      }
+    }
+  ]
+}
+
+
+STEP 11 — Replace Values
+Replace:
+SQS_QUEUE_ARN
+Example:
+arn:aws:sqs:us-east-1:123456789012:document-processing-queue
+
+
+S3_BUCKET_ARN
+Example:
+arn:aws:s3:::document-processing-prod
+
+Save policy.
+
+STEP 12 — Create S3 Event Notification
+Open bucket:
+document-processing-prod
+
+Go to:
+Properties
+→ Event Notifications
+→ Create event notification
+
+
+STEP 13 — Configure Event
+Event Name
+raw-upload-event
+
+
+Event Types
+Select:
+All object create events
+
+
+Prefix Filter
+raw/
+
+Only files uploaded to raw/ trigger processing.
+
+Destination
+Choose:
+SQS Queue
+
+Select:
+document-processing-queue
+
+Save.
+
+STEP 14 — Test Upload
+Upload any file:
+raw/test.pdf
+
+
+STEP 15 — Verify SQS Event
+Open:
+document-processing-queue
+
+Click:
+Send and receive messages
+→ Poll for messages
+
+You should see event message.
+Example:
+{
+  "Records": [
+    {
+      "eventName": "ObjectCreated:Put",
+      "s3": {
+        "bucket": {
+          "name": "document-processing-prod"
+        },
+        "object": {
+          "key": "raw/test.pdf"
+        }
+      }
+    }
+  ]
+}
+
+SUCCESS means event-driven pipeline works.
+
+STEP 16 — Create ECS IAM Task Role
+Open AWS Console:
+https://console.aws.amazon.com/iam/
+Create Role
+Choose:
+AWS Service
+→ ECS Task
+
+
+STEP 17 — Attach Permissions
+S3 Permissions
+AmazonS3FullAccess
+
+SQS Permissions
+AmazonSQSFullAccess
+
+
+STEP 18 — Name Role
+Example:
+ecs-document-worker-role
+
+Create role.
+
+STEP 19 — Attach Role to ECS Task
+Open:
+ECS
+→ Task Definitions
+
+Open ingestion worker task.
+Set:
+Task Role = ecs-document-worker-role
+
+Deploy new revision.
+
+STEP 20 — Worker Processing Flow
+Your ECS worker should:
+1. Read SQS Message
+Example:
+{
+  "bucket": "document-processing-prod",
+  "key": "raw/test.pdf"
+}
+
+
+2. Download File
+From:
+raw/
+
+
+3. Move to processing/
+Example:
+processing/test.pdf
+
+
+4. Process Document
+OCR / embedding / extraction.
+
+5. Success
+Save result:
+processed/test.json
+
+Delete:
+raw/
+processing/
+
+6. Failure
+Move to:
+failed/test.pdf
+
+
+STEP 21 — Archive Old Processed Data
+Do NOT manually archive every file.
+Use lifecycle rules.
+
+STEP 22 — Create Lifecycle Rule
+Open bucket.
+Go to:
+Management
+→ Lifecycle Rules
+→ Create Rule
+
+
+STEP 23 — Configure Archive Rule
+Rule Name
+archive-old-processed-files
+
+
+Prefix
+processed/
+
+
+Transition Rule
+After:
+90 days
+
+Move to:
+Glacier Instant Retrieval
+
+
+Optional Delete Rule
+Delete after:
+365 days
+
+Save.
+
+Final Recommended Production Flow
+raw/
+   ↓
+SQS Event
+   ↓
+ECS Worker
+   ↓
+processing/
+   ↓
+processed/
+   ↓ (90 days later)
+archive/ (Glacier)
+
+
+Final Recommended Lifecycle Rules
+Folder
+Action
+raw/
+Delete after 7 days
+processing/
+Delete after 1 day
+failed/
+Delete after 30 days
+processed/
+Archive after 90 days
+
+
+Final Enterprise Architecture
+ALB
+ ↓
+ECS API Service
+ ↓
+S3 raw/
+ ↓
+S3 Event Notification
+ ↓
+SQS Queue
+ ↓
+ECS Ingestion Worker
+ ↓
+processed/
+ ↓
+PostgreSQL + Redis
+
+This is a scalable, fault-tolerant, enterprise-grade event-driven ingestion architecture in AWS.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+—-----------------------------------------------xxxxxxxxx—-----------------------------------------------------
+AWS Architecture Cost Estimation Report
+
+1. Architecture Components
+Core Infrastructure
+Amazon VPC
+Public and Private Subnets
+Internet Gateway
+Route Tables
+Security Groups
+NAT Gateway
+Compute Layer
+Amazon ECS Fargate
+ECS Cluster
+ECS Services
+ECS Task Definitions
+Docker Containers
+Amazon ECR
+Load Balancing & Networking
+Application Load Balancer (ALB)
+Route 53 (Optional if domain used)
+Database Layer
+Amazon RDS PostgreSQL
+Amazon ElastiCache Redis
+Storage Layer
+Amazon S3
+Security & Secrets
+AWS Secrets Manager
+IAM Roles & Policies
+Monitoring & Logging
+Amazon CloudWatch
+CloudWatch Logs
+
+2. Assumed Production Architecture
+ECS Services
+Service
+CPU
+Memory
+Tasks
+Ingestion Service
+2 vCPU
+8 GB
+1
+Retrieval Service
+2 vCPU
+8 GB
+1
+
+Database
+Componet
+Configuration
+PostgreSQL
+db.t4g.xlarge
+Redis
+cache.t3.micro
+
+Storage
+Component
+ Usage
+S3 Storage
+100 GB
+ECR Storage
+20 GB
+CloudWatch Logs
+20 GB/month
+
+Network Traffic
+Component
+Usage
+Internet Data Transfer
+500 GB/month
+
+
+3. Estimated Monthly AWS Cost
+VPC & Networking
+Service
+Estimated Monthly Cost
+VPC
+Free
+Public/Private Subnets
+Free
+Internet Gateway
+Free
+NAT Gateway (2 AZ)
+$70 - $80
+Data Processing through NAT
+$5 - $15
+Elastic IP
+Free when attached
+Route Tables
+Free
+
+Estimated Networking Total
+$75 - $95/month
+
+4. ECS Fargate Cost
+ECS Fargate Tasks
+ECS Services
+Resource
+Estimate
+vCPU Usage
+~4 vCPU
+Memory Usage
+~16 GB
+Estimated Cost
+$120 -$180
+
+ECS Additional Costs
+Service
+Estimate
+ECS Control Plane
+Free
+Task Storage
+Included
+ECS Service Discovery
+Minimal
+
+ECS Total
+$120 - $180/month
+
+5. Application Load Balancer Cost
+Component
+Estimate
+ALB Hourly Charge
+$18 - $22
+LCU Usage
+$5 - $15
+
+ALB Total
+$23 - $37/month
+
+6. RDS PostgreSQL Cost
+Component
+Estimate
+db.t4g.xlarge Instance
+$200 - $230
+500 GB GP3 SSD Storage (Single-AZ)
+$45 - $60
+Automated Backup
+$3 - $8
+
+RDS Total
+$250 - $300/month
+
+7. Redis (ElastiCache) Cost
+Component
+Estimate
+cache.t3.micro
+$12 - $18
+
+Redis Total
+$12 - $18/month
+
+8. Amazon S3 Cost
+Component
+Estimate
+100 GB Storage
+$2 - $3
+PUT/GET Requests
+$1 - $5
+Data Transfer
+Minimal
+
+S3 Total
+$3 - $8/month
+
+9. Amazon ECR Cost
+Component
+Estimate
+20 GB Docker Images
+$2 - $4
+
+ECR Total
+$2 - $4/month
+
+|---|
+| Web ACL | $5 |
+| Rules | $5 - $15 |
+| Request Inspection | $1 - $10 |
+WAF Total
+$10 - $30/month
+
+12. CloudWatch Monitoring Cost
+Component
+Estimate
+Logs Ingestion
+$3 - $10
+Metrics
+$1 - $5
+Dashboards
+Minimal
+
+CloudWatch Total
+$4 - $15/month
+
+13. Secrets Manager Cost
+Component
+Estimate
+5 Secrets
+$2 - $3
+API Calls
+Minimal
+
+Secrets Manager Total
+$2 - $3/month
+
+14. Route 53 Cost (Optional)
+Component
+Estimate
+Hosted Zone
+$0.50
+DNS Queries
+$0.50 - $2
+
+Route 53 Total
+$1 - $3/month
+
+15. Complete Estimated Monthly Cost
+Service Category
+Estimated Cost
+Networking
+$75 - $95
+ECS Fargate
+$120 - $180
+Load Balancer
+$23 - $37
+RDS PostgreSQL
+$250 - $300
+Redis
+$12 - $18
+S3
+$3 - $8
+ECR
+$2 - $4
+CloudWatch
+$4 - $15
+Secrets Manager
+$2 - $3
+Route 53
+$1 - $3
+
+Estimated Total Monthly Cost
+Development Environment
+~$500 - $700/month
+
+16. Major Cost Drivers
+Highest Cost Services
+NAT Gateway
+ECS Fargate compute
+Application Load Balancer
+RDS Database
+Redis
+
+17. Cost Optimization Recommendations
+Reduce NAT Gateway Cost
+Option 1: Use VPC Endpoints
+Recommended for:
+S3
+ECR
+CloudWatch
+Secrets Manager
+Potential savings:
+$20 - $40/month
+Reduce ECS Cost
+Option 1: Right-size Fargate Tasks
+Use lower CPU/memory during development
+Enable autoscaling
+Potential savings:
+20% - 40%
+Reduce Database Cost
+Option 1: Use db.t4g.medium
+Potential savings:
+15% - 25%
+Reduce CloudWatch Cost
+Set log retention to 7–14 days
+Avoid excessive debug logging
+
+
+
+18. Alternative Low-Cost Architecture
+
+
+19. Final Recommendation
+Best Production Setup
+Recommended stack:
+ECS Fargate
+ALB
+RDS PostgreSQL
+Redis
+S3
+CloudFront
+WAF
+Secrets Manager
+CloudWatch
+Best Cost Optimization
+Use VPC Endpoints instead of NAT where possible
+Enable autoscaling
+Use Graviton instances (t4g)
+Configure log retention
+Use Cloudflare with CloudFront carefully to avoid duplicate CDN costs
+
+21. Useful AWS Pricing Calculators
+AWS Pricing Calculator
+https://calculator.aws
+ECS Pricing
+https://aws.amazon.com/fargate/pricing/
+RDS Pricing
+https://aws.amazon.com/rds/postgresql/pricing/
+CloudFront Pricing
+https://aws.amazon.com/cloudfront/pricing/
+WAF Pricing
+https://aws.amazon.com/waf/pricing/
+
+22. Conclusion
+This architecture is suitable for a scalable production application with document upload, backend APIs, and distributed services.
+The largest recurring costs will typically come from:
+NAT Gateway
+ECS compute
+Database usage
+Load balancer usage
+A carefully optimized setup can significantly reduce costs while maintaining scalability and security.
+
+
+
+

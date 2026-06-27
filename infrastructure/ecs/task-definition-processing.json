@@ -1,0 +1,26 @@
+{
+  "family": "document-services-processing",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "containerDefinitions": [
+    {
+      "name": "data-processing-service",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/document-services/data-processing-service:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 4003, "protocol": "tcp" }],
+      "environment": [
+        { "name": "SQS_QUEUE_URL", "value": "<SQS_QUEUE_URL>" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/document-services/data-processing-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
